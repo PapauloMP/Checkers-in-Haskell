@@ -1,14 +1,15 @@
 -- Damas em Haskell com Captura
 -- Autores: 
 -- Marcos Paulo Rodrigues da Silvas (202165556C)
--- João Victor Wayand De Jesus Dias
+-- João Victor Wayand De Jesus Dias (201935012)
+{-# LANGUAGE BlockArguments #-}
 
 import Data.Char (chr, ord, toUpper)
 import Data.List (intercalate, maximumBy)
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Control.Concurrent (threadDelay)
 import System.CPUTime (getCPUTime)
--- import Data.Ord (comparing)
+import Data.Ord (comparing)
 
 
 -- Data types
@@ -261,40 +262,88 @@ gameLoop gs (playerAType, playerBType) = do
     showPos (r, c) = [chr (c + ord 'A')] ++ show (r + 1)
 
 
+-- Avalia um estado do tabuleiro para uma peça específica
+evaluateBoardPosition :: Position -> Player -> PieceType -> Int
+evaluateBoardPosition (r, c) player pieceType =
+    let
+        -- Prioridade: Ir para a promoção
+        promoBonus = case player of
+            PlayerA -> if r == 7 && pieceType == Man then 100 else 0
+            PlayerB -> if r == 0 && pieceType == Man then 100 else 0
+        -- Prioridade: Centro do tabuleiro
+        centerBonus = if (r >= 2 && r <= 5) && (c >= 2 && c <= 5) then 20 else 0
+        -- Prioridade: Avançar (para peões)
+        advanceScore = case player of
+            PlayerA -> r * 2 -- Quanto mais pra frente (maior r), melhor para PlayerA
+            PlayerB -> (boardSize - 1 - r) * 2 -- Quanto mais pra frente (menor r), melhor para PlayerB
+        -- Prioridade: Dama é mais valiosa
+        kingBonus = if pieceType == King then 50 else 0
+    in
+        promoBonus + centerBonus + advanceScore + kingBonus
 
--- Gera um número pseudoaleatório entre 0 e n-1
-randomInt :: Int -> IO Int
-randomInt n = do
-  time <- getCPUTime
-  let r = fromIntegral (time `mod` fromIntegral n)
-  return r
 
--- IA simples que escolhe o primeiro movimento disponível válido ou o de maior captura
+-- Avaliação de Movimento Específico
+evaluateMove :: GameState -> (Position, Position) -> Int
+evaluateMove gs (from, to) =
+    let
+        currentBoard = board gs
+        movingPiece = case getSquare currentBoard from of
+            Just (Dark (Just p)) -> p
+            _ -> error "evaluateMove: No piece at 'from' position." 
+
+        (Piece player pieceType) = movingPiece
+        -- 1. Pontuação para CAPTURA
+        -- Calculamos se este movimento específico resulta em uma captura e quantas peças
+        numCaptured = case filter ((== to) . last . fst) (capturePaths gs from) of
+                         [] -> 0 
+                         ((_, cs):_) -> length cs 
+        -- 2. Pontuação para PROMOÇÃO
+        promoScore = if pieceType == Man && promote player Man to == King then 200 else 0
+        -- 3. Pontuação para AVANÇO (Peões)
+        advanceScore = if pieceType == Man then
+                           case player of
+                               PlayerA -> (fst to - fst from) * 5 -- Quanto mais avança (maior 'r'), melhor para A
+                               PlayerB -> (fst from - fst to) * 5 -- Quanto mais avança (menor 'r'), melhor para B
+                       else 0 
+        -- Privilegia movimentos da Dama
+        kingPresenceScore = if pieceType == King then 50 else 0
+    in
+        (numCaptured * 1000) + promoScore + advanceScore + kingPresenceScore
+
+-- IA prioriza capturas máximas e movimentos com maior pontuação descrita
 selectAIMove :: GameState -> IO (Maybe (Position, Position))
 selectAIMove gs = do
-  let b = board gs
-      p = currentPlayer gs
-      positions = [ (r, c) | r <- [0..7], c <- [0..7], Just (Dark (Just (Piece p _))) <- [getSquare b (r,c)] ]
-      allCaptures = [ (from, path, cs) |
-                      from <- positions,
-                      (path, cs) <- capturePaths gs from,
-                      not (null cs) ]
-
-  if not (null allCaptures)
-    then do
-      idx <- randomInt (length allCaptures)
-      let (from, path, _) = allCaptures !! idx
-      return $ Just (from, last path)
-    else do
-      let allMoves = [ (from, to) |
-                       from <- positions,
-                       to <- validMoves gs from ]
-      if null allMoves
-        then return Nothing
+    let b = board gs
+        p = currentPlayer gs
+        playerPieces = [ pos | r <- [0..7], c <- [0..7],
+                           let pos = (r,c),
+                           Just (Dark (Just (Piece p' _))) <- [getSquare b pos],
+                           p' == p ]
+        allCaptures = [ (from, path, cs) |
+                          from <- playerPieces,
+                          (path, cs) <- capturePaths gs from,
+                          not (null cs) ]
+                          
+    if not (null allCaptures)
+        then do
+            let maxCapturedCount = maximum (map (length . (\(_, _, cs) -> cs)) allCaptures)
+                bestCaptures = filter ((== maxCapturedCount) . length . (\(_, _, cs) -> cs)) allCaptures
+                bestCaptureMoves = [ (from, last path) | (from, path, _) <- bestCaptures ]
+            let ratedMoves = [ (evaluateMove gs m, m) | m <- bestCaptureMoves ]
+            if null ratedMoves
+                then return Nothing
+                else return $ Just (snd (maximumBy (comparing fst) ratedMoves))
         else do
-          idx <- randomInt (length allMoves)
-          return $ Just (allMoves !! idx)
-
+            -- Se não houver capturas, encontre todos os movimentos normais válidos
+            let allNormalMoves = [ (from, to) |
+                                   from <- playerPieces,
+                                   to <- validMoves gs from ]
+            if null allNormalMoves
+                then return Nothing
+                else do
+                    -- Escolhe o de maior pontuação possível
+                    let ratedMoves = [ (evaluateMove gs m, m) | m <- allNormalMoves ]
+                    return $ Just (snd (maximumBy (comparing fst) ratedMoves))
 
 -- Loop de IA vs IA
 gameLoopIA :: GameState -> IO ()
